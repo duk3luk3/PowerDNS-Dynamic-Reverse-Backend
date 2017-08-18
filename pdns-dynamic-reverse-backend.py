@@ -39,15 +39,12 @@ THE SOFTWARE.
 """
 import sys, os
 import re
-import syslog
 import time
 import netaddr
 import IPy
 import radix
 import yaml
-
-syslog.openlog(os.path.basename(sys.argv[0]), syslog.LOG_PID)
-syslog.syslog('starting up')
+from functools import partial
 
 class HierDict(dict):
     def __init__(self, parent=None, default=None):
@@ -83,18 +80,27 @@ def base36decode(s):
     return n
 
 
+def print_log(set_loglevel, out, loglevel, msg, *args):
+    if set_loglevel >= loglevel:
+        print >>out, 'LOG\t' + msg % tuple(args)
 
-def parse(prefixes, rtree, fd, out):
+def print_data(set_loglevel, out, msg='', *args, **kwargs):
+    verb = kwargs.get('verb', 'DATA')
+    answer = '%s\t' % (verb)  + msg % tuple(args)
+    print_log(set_loglevel, out, 3, answer)
+    print >>out, answer
+
+def parse(prefixes, rtree, args_loglevel, fd, out):
+    log = partial(print_log, args_loglevel, out)
+    data = partial(print_data, args_loglevel, out)
     line = fd.readline().strip()
     if not line.startswith('HELO'):
-        print >>out, 'FAIL'
+        data('FAIL')
         out.flush()
-        syslog.syslog('received "%s", expected "HELO"' % (line,))
         sys.exit(1)
     else:
-        print >>out, 'OK\t%s ready with %d prefixes configured' % (os.path.basename(sys.argv[0]),len(prefixes))
+        data('%s ready with %d prefixes configured, loglevel %d', os.path.basename(sys.argv[0]), len(prefixes), args_loglevel)
         out.flush()
-        syslog.syslog('received HELO from PowerDNS')
 
     lastnet=0
     while True:
@@ -102,37 +108,36 @@ def parse(prefixes, rtree, fd, out):
         if not line:
             break
 
-        #syslog.syslog('<<< %s' % (line,))
-        print >>out, 'LOG\tline: %s' % line
+        log(3, 'QERY\t%s', line)
 
         request = line.split('\t')
         if request[0] == 'AXFR':
             if not lastnet == 0:
-                print >>out, 'DATA\t%s\t%s\tSOA\t%d\t%s\t%s %s %s 10800 3600 604800 3600' % \
-                        (lastnet['forward'], 'IN', lastnet['ttl'], qid, lastnet['dns'], lastnet['email'], time.strftime('%Y%m%d%H'))
+                data('%s\t%s\tSOA\t%d\t%s\t%s %s %s 10800 3600 604800 3600',
+                        lastnet['forward'], 'IN', lastnet['ttl'], qid, lastnet['dns'], lastnet['email'], time.strftime('%Y%m%d%H'))
                 lastnet=lastnet
                 for ns in lastnet['nameserver']:
-                    print >>out, 'DATA\t%s\t%s\tNS\t%d\t%s\t%s' % \
-                            (lastnet['forward'], 'IN', lastnet['ttl'], qid, ns)
-            print >>out, 'END'
+                    data('%s\t%s\tNS\t%d\t%s\t%s',
+                            lastnet['forward'], 'IN', lastnet['ttl'], qid, ns)
+            data(verb='END')
             out.flush()
             continue
         if len(request) < 6:
-            print >>out, 'LOG\tPowerDNS sent unparsable line'
-            print >>out, 'FAIL'
+            log(1, 'PowerDNS sent unparsable line')
+            data(verb='END')
             out.flush()
             continue
 
 
-        try:
-            kind, qname, qclass, qtype, qid, ip = request
-        except:
-            kind, qname, qclass, qtype, qid, ip, their_ip = request
-        #debug
-        print >>out, 'LOG\tPowerDNS sent qname>>%s<< qtype>>%s<< qclass>>%s<< qid>>%s<< ip>>%s<<' % (qname, qtype, qclass, qid, ip)
+        (kind, qname, qclass, qtype, qid, ip), rest = request[:6], request[6:]
+
+        if len(rest) > 0:
+            their_ip = rest[0]
+
+        log(4, 'Parsed query: qname=%s, qtype=%s, qclass=%s, qid=%s, ip=%s', qname, qtype, qclass, qid, ip)
 
         if qtype in ['AAAA', 'ANY']:
-            #print >>out, 'LOG\twe got a AAAA query'
+            log(5, 'Processing %s Query for AAAA', qtype)
             for range, key in prefixes.iteritems():
                 if qname.endswith('.%s' % (key['forward'],)) and key['version'] == 6 and qname.startswith(key['prefix']):
                     node = qname[len(key['prefix']):].replace('%s.%s' % (key['postfix'], key['forward'],), '')
@@ -142,11 +147,10 @@ def parse(prefixes, rtree, fd, out):
                         node = None
                     if node:
                         ipv6 = netaddr.IPAddress(long(range.value) + long(node))
-                        print >>out, 'DATA\t%s\t%s\tAAAA\t%d\t%s\t%s' % \
-                            (qname, qclass, key['ttl'], qid, ipv6)
+                        data('%s\t%s\tAAAA\t%d\t%s\t%s', qname, qclass, key['ttl'], qid, ipv6)
                         break
         if qtype in ['A', 'ANY']:
-            #print >>out, 'LOG\twe got a A query'
+            log(5, 'Processing %s Query for AAAA', qtype)
             for range, key in prefixes.iteritems():
                 if qname.endswith('.%s' % (key['forward'],)) and key['version'] == 4 and qname.startswith(key['prefix']):
                     node = qname[len(key['prefix']):].replace('%s.%s' % (key['postfix'], key['forward'],), '')
@@ -156,12 +160,11 @@ def parse(prefixes, rtree, fd, out):
                         node = None
                     if node:
                         ipv4 = netaddr.IPAddress(long(range.value) + long(node))
-                        print >>out, 'DATA\t%s\t%s\tA\t%d\t%s\t%s' % \
-                            (qname, qclass, key['ttl'], qid, ipv4)
+                        data('%s\t%s\tA\t%d\t%s\t%s', qname, qclass, key['ttl'], qid, ipv4)
                 break
 
         if qtype in ['PTR', 'ANY'] and qname.endswith('.ip6.arpa'):
-            #print >>out, 'LOG\twe got a PTR query'
+            log(5, 'Processing %s Query for ip6 PTR', qtype)
             ptr = qname.split('.')[:-2][::-1]
             ipv6 = ':'.join(''.join(ptr[x:x+4]) for x in xrange(0, len(ptr), 4))
             try:
@@ -173,11 +176,11 @@ def parse(prefixes, rtree, fd, out):
                 range, key = node.data['prefix'], prefixes[node.data['prefix']]
                 node = ipv6.value - range.value
                 node = base36encode(node)
-                print >>out, 'DATA\t%s\t%s\tPTR\t%d\t%s\t%s%s%s.%s' % \
-                    (qname, qclass, key['ttl'], qid, key['prefix'], node, key['postfix'], key['forward'])
+                data('%s\t%s\tPTR\t%d\t%s\t%s%s%s.%s',
+                    qname, qclass, key['ttl'], qid, key['prefix'], node, key['postfix'], key['forward'])
 
         if qtype in ['PTR', 'ANY'] and qname.endswith('.in-addr.arpa'):
-            #print >>out, 'LOG\twe got a PTR query'
+            log(5, 'Processing %s Query for in-addr PTR', qtype)
             ptr = qname.split('.')[:-2][::-1]
             ipv4='.'.join(''.join(ptr[x:x+1]) for x in xrange(0, len(ptr), 1))
             try:
@@ -189,37 +192,35 @@ def parse(prefixes, rtree, fd, out):
                 range, key = node.data['prefix'], prefixes[node.data['prefix']]
                 node = ipv4.value - range.value
                 node = base36encode(node)
-                print >>out, 'DATA\t%s\t%s\tPTR\t%d\t%s\t%s%s%s.%s' % \
-                    (qname, qclass, key['ttl'], qid, key['prefix'], node, key['postfix'], key['forward'])
+                data('%s\t%s\tPTR\t%d\t%s\t%s%s%s.%s',
+                    qname, qclass, key['ttl'], qid, key['prefix'], node, key['postfix'], key['forward'])
 
 
         if qtype in ['SOA', 'ANY', 'NS']:
+            log(5, 'Processing %s Query for SOA/NS', qtype)
             for range, key in prefixes.iteritems():
                 if qname == key['domain']:
                     if not qtype == 'NS':
-                        print >>out, 'DATA\t%s\t%s\tSOA\t%d\t%s\t%s %s %s 10800 3600 604800 3600' % \
-                                (key['domain'], qclass, key['ttl'], qid, key['dns'], key['email'], time.strftime('%Y%m%d%H'))
+                        data('%s\t%s\tSOA\t%d\t%s\t%s %s %s 10800 3600 604800 3600',
+                                key['domain'], qclass, key['ttl'], qid, key['dns'], key['email'], time.strftime('%Y%m%d%H'))
                         lastnet=key
                     if qtype in ['ANY', 'NS']:
                         for ns in key['nameserver']:
-                            print >>out, 'DATA\t%s\t%s\tNS\t%d\t%s\t%s' % \
-                                    (key['domain'], qclass, key['ttl'], qid, ns)
+                            data('%s\t%s\tNS\t%d\t%s\t%s', key['domain'], qclass, key['ttl'], qid, ns)
                     break
                 elif qname == key['forward']:
                     if not qtype == 'NS':
-                        print >>out, 'DATA\t%s\t%s\tSOA\t%d\t%s\t%s %s %s 10800 3600 604800 3600' % \
-                                (key['forward'], qclass, key['ttl'], qid, key['dns'], key['email'], time.strftime('%Y%m%d%H'))
+                        data('%s\t%s\tSOA\t%d\t%s\t%s %s %s 10800 3600 604800 3600',
+                                key['forward'], qclass, key['ttl'], qid, key['dns'], key['email'], time.strftime('%Y%m%d%H'))
                         lastnet=key
                     if qtype in ['ANY', 'NS']:
                         for ns in key['nameserver']:
-                            print >>out, 'DATA\t%s\t%s\tNS\t%d\t%s\t%s' % \
-                                    (key['forward'], qclass, key['ttl'], qid, ns)
+                            data('%s\t%s\tNS\t%d\t%s\t%s', key['forward'], qclass, key['ttl'], qid, ns)
                     break
 
-        print >>out, 'END'
+        data(verb='END')
         out.flush()
 
-    syslog.syslog('terminating')
     return 0
 
 
@@ -247,11 +248,13 @@ def parse_config(config_path):
 
 if __name__ == '__main__':
     import sys
+    import argparse
 
-    if len(sys.argv) > 1:
-        config_path = sys.argv[1]
-    else:
-        config_path = CONFIG
+    parser = argparse.ArgumentParser(description='Resolve DNS pool zones compliant to PowerDNS Pipe Backend ABI version 1')
+    parser.add_argument('-c', '--config', default=CONFIG, help='Configuration file path')
+    parser.add_argument('-l', '--loglevel', default=1, type=int, help='log level - 1: Warn, 2: Info, 3: Responses, 4: Debug, 5: Verbose')
 
-    prefixes, rtree = parse_config(config_path)
-    sys.exit(parse(prefixes, rtree, sys.stdin, sys.stdout))
+    args = parser.parse_args()
+
+    prefixes, rtree = parse_config(args.config)
+    sys.exit(parse(prefixes, rtree, args.loglevel, sys.stdin, sys.stdout))
