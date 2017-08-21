@@ -39,12 +39,14 @@ THE SOFTWARE.
 """
 import sys, os
 import re
+import syslog
 import time
 import netaddr
 import IPy
 import radix
 import yaml
 from functools import partial
+
 
 class HierDict(dict):
     def __init__(self, parent=None, default=None):
@@ -80,26 +82,40 @@ def base36decode(s):
     return n
 
 
-def print_log(set_loglevel, out, loglevel, msg, *args):
+def print_log(set_loglevel, do_syslog, out, loglevel, msg, *args):
+    if do_syslog:
+        syslog.syslog('=%d= %s' % (loglevel, logmsg))
     if set_loglevel >= loglevel:
-        print >>out, 'LOG\t' + msg % tuple(args)
+        logmsg = 'LOG\t' + msg % tuple(args)
+        print >>out, logmsg
 
-def print_data(set_loglevel, out, msg='', *args, **kwargs):
+def print_data(set_loglevel, do_syslog, out, msg='', *args, **kwargs):
     verb = kwargs.get('verb', 'DATA')
-    answer = '%s\t' % (verb)  + msg % tuple(args)
-    print_log(set_loglevel, out, 3, answer)
+    if len(msg) > 0:
+        answer = '%s\t' % (verb)  + msg % tuple(args)
+    else:
+        answer = verb
+    if verb != 'OK':
+        print_log(set_loglevel, do_syslog, out, 3, answer)
+    if do_syslog:
+        syslog.syslog('>>>  ' + answer)
     print >>out, answer
 
-def parse(prefixes, rtree, args_loglevel, fd, out):
-    log = partial(print_log, args_loglevel, out)
-    data = partial(print_data, args_loglevel, out)
+def parse(prefixes, rtree, args, fd, out):
+    if args.syslog:
+        syslog.openlog(os.path.basename(sys.argv[0]), syslog.LOG_PID)
+
+    log = partial(print_log, args.loglevel, args.syslog, out)
+    data = partial(print_data, args.loglevel, args.syslog, out)
     line = fd.readline().strip()
+    if args.syslog:
+        syslog.syslog('<<< ' + line)
     if not line.startswith('HELO'):
         data('FAIL')
         out.flush()
         sys.exit(1)
     else:
-        data('%s ready with %d prefixes configured, loglevel %d', os.path.basename(sys.argv[0]), len(prefixes), args_loglevel)
+        data('%s ready with %d prefixes configured, loglevel %d', os.path.basename(sys.argv[0]), len(prefixes), args.loglevel, verb='OK')
         out.flush()
 
     lastnet=0
@@ -109,6 +125,8 @@ def parse(prefixes, rtree, args_loglevel, fd, out):
             break
 
         log(3, 'QERY\t%s', line)
+        if args.syslog:
+            syslog.syslog('<<< ' + line)
 
         request = line.split('\t')
         if request[0] == 'AXFR':
@@ -199,6 +217,7 @@ def parse(prefixes, rtree, args_loglevel, fd, out):
         if qtype in ['SOA', 'ANY', 'NS']:
             log(5, 'Processing %s Query for SOA/NS', qtype)
             for range, key in prefixes.iteritems():
+                log(5, 'Checking domain %s <> %s', key['domain'], qname)
                 if qname == key['domain']:
                     if not qtype == 'NS':
                         data('%s\t%s\tSOA\t%d\t%s\t%s %s %s 10800 3600 604800 3600',
@@ -253,8 +272,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Resolve DNS pool zones compliant to PowerDNS Pipe Backend ABI version 1')
     parser.add_argument('-c', '--config', default=CONFIG, help='Configuration file path')
     parser.add_argument('-l', '--loglevel', default=1, type=int, help='log level - 1: Warn, 2: Info, 3: Responses, 4: Debug, 5: Verbose')
+    parser.add_argument('-s', '--syslog', action='store_true', default=False, help='Log to syslog - useful for debugging protocol issues')
 
     args = parser.parse_args()
 
     prefixes, rtree = parse_config(args.config)
-    sys.exit(parse(prefixes, rtree, args.loglevel, sys.stdin, sys.stdout))
+    sys.exit(parse(prefixes, rtree, args, sys.stdin, sys.stdout))
