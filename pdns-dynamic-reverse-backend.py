@@ -251,10 +251,28 @@ def parse_config(config_path):
     defaults = config_dict.get('defaults', {})
     prefixes = { netaddr.IPNetwork(prefix) : HierDict(defaults, info) for prefix, info in config_dict['prefixes'].items()}
 
+    new_prefixes = {}
+
     for zone in prefixes:
         if not prefixes[zone].has_key('domain'):
             from IPy import IP
-            prefixes[zone]['domain']=IP(str(zone.cidr)).reverseName()[:-1]
+            revNames = IP(str(zone.cidr)).reverseNames()
+            if len(revNames) == 1:
+                prefixes[zone]['domain']=revNames[0][:-1]
+                new_prefixes[zone] = prefixes[zone]
+            elif zone.version == 4:
+                for revName in revNames:
+                    splitter = '.' if zone.version == 4 else ':'
+                    fwName = revName.split(splitter)[-4::-1]
+                    prefixlen = len(fwName) * 8
+                    newZone = netaddr.IPNetwork(splitter.join(fwName) + '/' + str(prefixlen))
+                    new_prefixes[newZone] = HierDict(prefixes[zone], {'domain': revName[:-1]})
+            else:
+                raise Exception('Version 6 zone should not have multiple reverse zones')
+        else:
+            new_prefixes[zone] = prefixes[zone]
+
+    prefixes = new_prefixes
 
     rtree=radix.Radix()
 
