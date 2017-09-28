@@ -118,6 +118,8 @@ def parse(prefixes, rtree, args, fd, out):
         data('%s ready with %d prefixes configured, loglevel %d', os.path.basename(sys.argv[0]), len(prefixes), args.loglevel, verb='OK')
         out.flush()
 
+    log(5, 'prefixes: %s', prefixes)
+
     lastnet=0
     while True:
         line = fd.readline().strip()
@@ -168,8 +170,9 @@ def parse(prefixes, rtree, args, fd, out):
                         data('%s\t%s\tAAAA\t%d\t%s\t%s', qname, qclass, key['ttl'], qid, ipv6)
                         break
         if qtype in ['A', 'ANY']:
-            log(5, 'Processing %s Query for AAAA', qtype)
+            log(5, 'Processing %s Query for %s for qtype A', qtype, qname)
             for range, key in prefixes.iteritems():
+                log(5, 'checking if qname.endswith %s and qname.startswith %s', key['forward'], key['prefix'])
                 if qname.endswith('.%s' % (key['forward'],)) and key['version'] == 4 and qname.startswith(key['prefix']):
                     node = qname[len(key['prefix']):].replace('%s.%s' % (key['postfix'], key['forward'],), '')
                     try:
@@ -177,9 +180,10 @@ def parse(prefixes, rtree, args, fd, out):
                     except ValueError:
                         node = None
                     if node:
+                        log(5, 'Decoded node %s, in range %s / %s', node, range, range.value)
                         ipv4 = netaddr.IPAddress(long(range.value) + long(node))
                         data('%s\t%s\tA\t%d\t%s\t%s', qname, qclass, key['ttl'], qid, ipv4)
-                break
+                        break
 
         if qtype in ['PTR', 'ANY'] and qname.endswith('.ip6.arpa'):
             log(5, 'Processing %s Query for ip6 PTR', qtype)
@@ -266,7 +270,7 @@ def parse_config(config_path):
                     fwName = revName.split(splitter)[-4::-1]
                     prefixlen = len(fwName) * 8
                     newZone = netaddr.IPNetwork(splitter.join(fwName) + '/' + str(prefixlen))
-                    new_prefixes[newZone] = HierDict(prefixes[zone], {'domain': revName[:-1]})
+                    new_prefixes[newZone] = HierDict(prefixes[zone], {'domain': revName[:-1], 'prefix': prefixes[zone]['prefix'] + fwName[-1] + '-'})
             else:
                 raise Exception('Version 6 zone should not have multiple reverse zones')
         else:
